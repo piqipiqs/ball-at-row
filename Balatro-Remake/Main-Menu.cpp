@@ -25,8 +25,7 @@ int main() {
     bool running = true;
 
     while (running) {
-        system("cls"); // Windows (hapus layar)
-        // kalau Linux/Mac ganti jadi: system("clear");
+        system("cls"); 
 
         showMenu();
         cin >> choice;
@@ -53,4 +52,5 @@ int main() {
     }
 
     return 0;
+
 }
