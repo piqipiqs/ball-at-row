@@ -3,14 +3,18 @@
 #include "Deck.h"
 #include "ScoringSystem.h"
 #include "Card.h"
+#include "ShopSystem.h"
+
+#include "modifiers/IModifier.h"
 
 #include <iostream>
 #include <vector>
 #include <set>
-#include <limits>
 #include <algorithm>
 #include <sstream>
 #include <string>
+#include <memory>
+#include <cmath>
 
 static void printOffered(const std::vector<Card>& offered) {
     std::cout << "Offered Cards:\n";
@@ -31,13 +35,13 @@ static std::vector<Card> dealOffered7(Deck& deck) {
     return offered;
 }
 
-// Baca input 1 baris: "1 2 5" (1-based), min 1 max 5 kartu, unik, range 1..7
+// input 1 baris: "1 2 5" (1-based), min 1 max 5, unik, range 1..7
 static std::vector<int> chooseIndicesFromLine_1Based(int maxPick, int maxIndex) {
     while (true) {
         std::cout << "Pick Cards (1-" << maxIndex << ", max " << maxPick << "): ";
 
         std::string line;
-        std::getline(std::cin >> std::ws, line); // >> ws buang whitespace/newline sisa
+        std::getline(std::cin >> std::ws, line);
 
         if (line.empty()) {
             std::cout << "Please type at least 1 number.\n";
@@ -48,9 +52,7 @@ static std::vector<int> chooseIndicesFromLine_1Based(int maxPick, int maxIndex) 
         std::vector<int> idx;
         int x;
 
-        while (iss >> x) {
-            idx.push_back(x);
-        }
+        while (iss >> x) idx.push_back(x);
 
         if (idx.empty()) {
             std::cout << "Invalid input. Example: 1 2 5\n";
@@ -87,7 +89,6 @@ static std::vector<Card> selectCards(const std::vector<Card>& offered, const std
     return chosen;
 }
 
-// Discard kartu yang dipilih dari offered, lalu draw pengganti sampai kembali 7
 static void discardSelected(std::vector<Card>& offered, const std::vector<int>& idx, Deck& deck) {
     std::vector<int> sorted = idx;
     std::sort(sorted.begin(), sorted.end(), std::greater<int>());
@@ -123,84 +124,126 @@ void RunSession::startRun() {
     std::cout << "\n=== START RUN ===\n";
 
     const int TOTAL_ROUND = 3;
-    const int targetScore[TOTAL_ROUND] = { 100, 150, 200 };
+    const int targetScore[TOTAL_ROUND] = { 50, 100, 200 };
 
-    const int HANDS_PER_ROUND = 3;
-    const int DISCARD_PER_ROUND = 2;
+    // base coin per round
+    const int baseCoin[TOTAL_ROUND] = { 10, 15, 25 };
+
+    // bisa di-upgrade di shop
+    int handsPerRound = 4;
+    int discardsPerRound = 3;
+
+    // combo upgrade global (tambahan multiplier)
+    double comboUpgradeBonus = 0.0;
+
+    // modifier dari shop
+    std::vector<std::unique_ptr<IModifier>> modifiers;
+
+    int coins = 0;
 
     ScoringSystem scoring;
+    ShopSystem shop;
 
     for (int round = 1; round <= TOTAL_ROUND; round++) {
 
-        Deck deck;            // reset deck tiap round
+        // reset deck tiap round
+        Deck deck;
         deck.shuffle();
 
         std::cout << "\n=============================\n";
-        std::cout << "ROUND " << round << " | Target: " << targetScore[round - 1] << "\n";
-        std::cout << "Hands: " << HANDS_PER_ROUND << " | Discard chances: " << DISCARD_PER_ROUND << "\n";
+        std::cout << "ROUND " << round
+                  << " | Target: " << targetScore[round - 1]
+                  << " | Base Coin: " << baseCoin[round - 1] << "\n";
+        std::cout << "Hands: " << handsPerRound
+                  << " | Discard chances: " << discardsPerRound << "\n";
+        std::cout << "Coins: " << coins << "\n";
+        std::cout << "Combo Upgrade Bonus: +" << comboUpgradeBonus << "x\n";
+        std::cout << "Modifiers owned: " << modifiers.size() << "\n";
         std::cout << "=============================\n";
 
-        int discardsLeft = DISCARD_PER_ROUND;
+        int discardsLeft = discardsPerRound;
         int roundTotalScore = 0;
 
-        for (int handNum = 1; handNum <= HANDS_PER_ROUND; handNum++) {
-            std::cout << "\n--- Hand " << handNum << "/" << HANDS_PER_ROUND << " ---\n";
+        bool cleared = false;
+        int lastPlayedCount = 0;
+
+        for (int handNum = 1; handNum <= handsPerRound && !cleared; handNum++) {
+            std::cout << "\n--- Hand " << handNum << "/" << handsPerRound << " ---\n";
             std::cout << "Discards left (this round): " << discardsLeft << "\n";
 
             std::vector<Card> offered = dealOffered7(deck);
 
             while (true) {
-                // 1) tampilkan 7 kartu
                 printOffered(offered);
 
-                // 2) user langsung pilih kartu (ENTER selesai)
                 std::vector<int> idx = chooseIndicesFromLine_1Based(5, (int)offered.size());
                 std::vector<Card> chosen = selectCards(offered, idx);
 
                 std::cout << "Selected Cards: ";
                 printLine(chosen);
 
-                // 3) baru muncul pilihan play/discard
                 char action = askPlayOrDiscardSelected(discardsLeft);
 
                 if (action == 'D') {
                     discardsLeft--;
                     discardSelected(offered, idx, deck);
                     std::cout << "Discarded selected cards! (Offered updated)\n\n";
-                    continue; // balik lagi pilih kartu dari offered terbaru
+                    continue;
                 }
 
                 // PLAY
+                lastPlayedCount = (int)chosen.size();
                 ScoreResult result = scoring.evaluate(chosen);
+
+                // apply combo upgrade bonus (bonus multiplier)
+                int finalScore = (int)std::lround(result.baseScore * (result.multiplier + comboUpgradeBonus));
+
+                // apply modifiers (IModifier::apply(int))
+                for (auto& m : modifiers) {
+                    finalScore = m->apply(finalScore);
+                }
 
                 std::cout << "Combo      : " << result.combo << "\n";
                 std::cout << "Base Score : " << result.baseScore << "\n";
-                std::cout << "Multiplier : x" << result.multiplier << "\n";
-                std::cout << "Final Score: " << result.finalScore << "\n";
+                std::cout << "Multiplier : x" << result.multiplier << " (+" << comboUpgradeBonus << ")\n";
+                std::cout << "Final Score: " << finalScore << "\n";
 
-                roundTotalScore += result.finalScore;
+                roundTotalScore += finalScore;
 
-                // progress target n/n setiap selesai play
-                std::cout << "Target Progress: " << roundTotalScore
-                          << " / " << targetScore[round - 1] << "\n";
+                std::cout << "Target Progress: "
+                          << roundTotalScore << " / " << targetScore[round - 1] << "\n";
 
-                break; // lanjut hand berikutnya
+                if (roundTotalScore >= targetScore[round - 1]) {
+                    cleared = true;
+                }
+
+                break; // selesai 1 hand
             }
         }
 
-        std::cout << "\n=== ROUND " << round << " TOTAL ===\n";
-        std::cout << "Total Score: " << roundTotalScore << "\n";
-        std::cout << "Target     : " << targetScore[round - 1] << "\n";
-
-        if (roundTotalScore >= targetScore[round - 1]) {
-            std::cout << "ROUND " << round << " CLEARED \n";
-        } else {
-            std::cout << "ROUND " << round << " FAILED \n";
+        if (!cleared) {
+            std::cout << "\n=== ROUND " << round << " FAILED ❌ ===\n";
+            std::cout << "Total Score: " << roundTotalScore << " / " << targetScore[round - 1] << "\n";
+            std::cout << "Coins Now  : " << coins << "\n";
             std::cout << "\n=== END RUN ===\n";
             return;
         }
+
+        // round cleared → coin reward: base + sisa kartu
+        int leftover = 7 - lastPlayedCount;
+        int earned = baseCoin[round - 1] + leftover;
+        coins += earned;
+
+        std::cout << "\n=== ROUND " << round << " CLEARED ✅ ===\n";
+        std::cout << "Coin Earned: " << baseCoin[round - 1] << " + " << leftover
+                  << " = " << earned << "\n";
+        std::cout << "Coins Now  : " << coins << "\n";
+
+        // SHOP setelah round
+        shop.openShop(coins, handsPerRound, discardsPerRound, comboUpgradeBonus, modifiers);
     }
 
     std::cout << "\n=== END RUN ===\n";
-    std::cout << "You cleared all rounds! \n";
+    std::cout << "You cleared all rounds! 🎉\n";
+    std::cout << "Final Coins: " << coins << "\n";
 }
